@@ -110,6 +110,7 @@ pub struct TransportLayerInner {
     pub(crate) cancel_token: CancellationToken,
     listens: Arc<RwLock<Vec<SipConnection>>>, // listening transports
     connections: Arc<DashMap<SipAddr, SipConnection>>, // outbound/inbound connections
+    serve_tokens: Arc<DashMap<SipAddr, CancellationToken>>, // by local addr: ends a serve loop
     pub(crate) transport_tx: TransportSender,
     pub(crate) transport_rx: Mutex<Option<TransportReceiver>>,
     pub domain_resolver: Box<dyn DomainResolver>,
@@ -135,6 +136,7 @@ impl TransportLayer {
             cancel_token,
             listens: Arc::new(RwLock::new(Vec::new())),
             connections: Arc::new(DashMap::new()),
+            serve_tokens: Arc::new(DashMap::new()),
             transport_tx,
             transport_rx: Mutex::new(Some(transport_rx)),
             domain_resolver,
@@ -167,6 +169,13 @@ impl TransportLayer {
 
     pub fn del_connection(&self, addr: &SipAddr) {
         self.inner.del_connection(addr)
+    }
+
+    /// Drop the pooled connection to `addr` and shut it down, so the next
+    /// lookup opens a fresh one (e.g. before a call, in case the stream
+    /// has silently wedged).
+    pub fn close_connection(&self, addr: &SipAddr) {
+        self.inner.close_connection(addr)
     }
 
     pub async fn lookup(
@@ -290,6 +299,17 @@ impl TransportLayerInner {
     pub(super) fn del_connection(&self, addr: &SipAddr) {
         debug!(%addr, "del_connection");
         self.connections.remove(addr);
+    }
+
+    /// Drop the pooled connection to `addr` and shut it down: its serve
+    /// loop exits and the socket closes once nothing else holds it.
+    pub(super) fn close_connection(&self, addr: &SipAddr) {
+        if let Some((_, connection)) = self.connections.remove(addr) {
+            debug!(%addr, "close_connection");
+            if let Some(token) = self.serve_tokens.get(connection.get_addr()) {
+                token.cancel();
+            }
+        }
     }
 
     async fn lookup(
@@ -422,6 +442,11 @@ impl TransportLayerInner {
             .unwrap_or_else(|| "-".to_string());
         info!(addr=%transport.get_addr(), remote=%remote_addr, "serve_connection: starting serve_loop");
         let pool = self.connections.clone();
+        // A token of this loop's own, so `close_connection` can end it.
+        let own_token = self.cancel_token.child_token();
+        self.serve_tokens
+            .insert(transport.get_addr().clone(), own_token.clone());
+        let serve_tokens = self.serve_tokens.clone();
         tokio::spawn(async move {
             match sender_clone.send(TransportEvent::New(transport.clone())) {
                 Ok(()) => {
@@ -434,6 +459,7 @@ impl TransportLayerInner {
             }
             select! {
                 _ = sub_token.cancelled() => { }
+                _ = own_token.cancelled() => { }
                 result = async {
                     transport.serve_loop(sender_clone.clone()).await
                 } => {
@@ -443,6 +469,7 @@ impl TransportLayerInner {
                 }
             }
             info!(addr=%transport.get_addr(), remote=%remote_addr, "transport serve_loop exited");
+            serve_tokens.remove(transport.get_addr());
             transport.close().await.ok();
             // Forget it in the pool, unless a newer connection to the same
             // remote has already taken its place (they differ by local port).
