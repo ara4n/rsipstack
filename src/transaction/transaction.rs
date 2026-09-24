@@ -320,6 +320,14 @@ impl Transaction {
         if let Some(connection) = self.connection.as_ref() {
             if let Err(e) = connection.send(message, self.destination.as_ref()).await {
                 warn!(key = %self.key, error = %e, "send failed");
+                // A pooled TCP/TLS connection the far end has dropped: forget
+                // it so Timer A's retry looks up (and opens) a fresh one.
+                if connection.is_reliable() {
+                    if let Some(remote) = connection.get_remote_addr() {
+                        self.endpoint_inner.transport_layer.del_connection(remote);
+                    }
+                    self.connection = None;
+                }
             }
         } else {
             debug!(key = %self.key, "no connection, will retry on timer");
@@ -820,6 +828,12 @@ impl Transaction {
                                 .await
                             {
                                 warn!(key = %self.key, error = %e, "timer A resend failed");
+                                if connection.is_reliable() {
+                                    if let Some(remote) = connection.get_remote_addr() {
+                                        self.endpoint_inner.transport_layer.del_connection(remote);
+                                    }
+                                    self.connection = None;
+                                }
                             }
                         } else {
                             debug!(key = %self.key, "timer A: no connection yet");

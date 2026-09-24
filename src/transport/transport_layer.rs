@@ -421,6 +421,7 @@ impl TransportLayerInner {
             .map(|addr| addr.to_string())
             .unwrap_or_else(|| "-".to_string());
         info!(addr=%transport.get_addr(), remote=%remote_addr, "serve_connection: starting serve_loop");
+        let pool = self.connections.clone();
         tokio::spawn(async move {
             match sender_clone.send(TransportEvent::New(transport.clone())) {
                 Ok(()) => {
@@ -443,6 +444,11 @@ impl TransportLayerInner {
             }
             info!(addr=%transport.get_addr(), remote=%remote_addr, "transport serve_loop exited");
             transport.close().await.ok();
+            // Forget it in the pool, unless a newer connection to the same
+            // remote has already taken its place (they differ by local port).
+            if let Some(remote) = transport.get_remote_addr() {
+                pool.remove_if(remote, |_, c| c.get_addr() == transport.get_addr());
+            }
             sender_clone.send(TransportEvent::Closed(transport)).ok();
         });
     }
