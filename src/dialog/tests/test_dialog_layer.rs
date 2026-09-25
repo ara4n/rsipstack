@@ -483,12 +483,12 @@ async fn test_make_invite_request_with_tcp_transport() -> crate::Result<()> {
 
     let request = dialog_layer.make_invite_request(&opt)?;
 
-    // Verify Contact header has the transport layer's TCP address and transport param
+    // Verify Contact header keeps the caller's host and gains the transport param
     let contact = request.contact_header()?.typed()?;
     assert_eq!(
         contact.uri.host_with_port,
         tcp_addr.into(),
-        "Contact URI should use the transport layer's TCP address"
+        "Contact URI should keep the caller's address"
     );
     assert!(
         contact
@@ -505,6 +505,59 @@ async fn test_make_invite_request_with_tcp_transport() -> crate::Result<()> {
         "TCP contact should have sip scheme"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_make_invite_request_keeps_public_contact_host() -> crate::Result<()> {
+    let token = CancellationToken::new();
+    let tl = TransportLayer::new(token.child_token());
+    // A listener on the unspecified address: what the Contact must not carry
+    let tcp_addr = "0.0.0.0:5060".parse()?;
+    let tcp_listener = TcpListenerConnection::new(tcp_addr, None).await?;
+    tl.add_transport(crate::transport::SipConnection::TcpListener(tcp_listener));
+    let endpoint = EndpointBuilder::new()
+        .with_user_agent("rsipstack-test")
+        .with_transport_layer(tl)
+        .build();
+    let dialog_layer = DialogLayer::new(endpoint.inner.clone());
+    let destination = SipAddr {
+        r#type: Some(Transport::Tcp),
+        addr: HostWithPort {
+            host: crate::sip::Host::IpAddr(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                10, 0, 0, 1,
+            ))),
+            port: Some(5060.into()),
+        },
+    };
+
+    // A public host given by the caller stays
+    let opt = crate::dialog::invitation::InviteOption {
+        caller: crate::sip::Uri::try_from("sip:alice@example.com")?,
+        callee: crate::sip::Uri::try_from("sip:bob@example.com")?,
+        contact: crate::sip::Uri::try_from("sip:alice@sip.example.com:5060")?,
+        destination: Some(destination.clone()),
+        ..Default::default()
+    };
+    let contact = dialog_layer
+        .make_invite_request(&opt)?
+        .contact_header()?
+        .typed()?;
+    assert_eq!(
+        contact.uri.host_with_port.to_string(),
+        "sip.example.com:5060"
+    );
+
+    // An unspecified one is filled from the transport
+    let opt = crate::dialog::invitation::InviteOption {
+        contact: crate::sip::Uri::try_from("sip:alice@0.0.0.0:5060")?,
+        ..opt
+    };
+    let contact = dialog_layer
+        .make_invite_request(&opt)?
+        .contact_header()?
+        .typed()?;
+    assert_eq!(contact.uri.host_with_port, tcp_addr.into());
     Ok(())
 }
 

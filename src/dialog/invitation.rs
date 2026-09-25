@@ -324,6 +324,13 @@ impl DialogLayer {
     /// # }
     /// ```
     pub fn make_invite_request(&self, opt: &InviteOption) -> Result<Request> {
+        fn contact_host_unspecified(uri: &crate::sip::Uri) -> bool {
+            match &uri.host_with_port.host {
+                crate::sip::Host::IpAddr(ip) => ip.is_unspecified(),
+                crate::sip::Host::Domain(d) => d.to_string().is_empty(),
+            }
+        }
+
         let last_seq = self.increment_last_seq();
         let to = crate::sip::typed::To {
             display_name: None,
@@ -380,9 +387,14 @@ impl DialogLayer {
             request.headers.push(route.clone().into());
         }
 
+        // The caller's Contact host is what peers must reach; the local
+        // transport address is only a fallback for an unspecified one, since
+        // a listener on 0.0.0.0 (or behind a load balancer) is not it.
         let contact = if let Some(ref addr) = transport_addr {
             let mut uri = opt.contact.clone();
-            uri.host_with_port = addr.addr.clone();
+            if contact_host_unspecified(&uri) {
+                uri.host_with_port = addr.addr.clone();
+            }
             if !uri
                 .params
                 .iter()
