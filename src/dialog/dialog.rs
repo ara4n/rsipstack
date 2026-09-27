@@ -1034,12 +1034,24 @@ impl DialogInner {
     /// request arrived on; a UAC dialog rides the flow its initial INVITE
     /// was sent on (e.g. a proxy dialing a WebSocket callee).
     fn resolve_affinity_connection(&self) -> Option<SipConnection> {
-        if !self.route_set.lock().is_empty() {
-            return None;
-        }
         let conn = self.server_connection.lock().clone()?;
         if !conn.is_reliable() {
             return None;
+        }
+        // A Record-Routing proxy (a SIP trunk, say) wants in-dialog requests
+        // sent to its Route, but when that Route is the very host the flow
+        // is to, the live flow *is* the way to reach it: reopening a
+        // connection to it by IP is at best redundant and, over TLS,
+        // usually impossible (a certificate for its hostname, not its IP).
+        // Only a Route pointing somewhere else takes precedence over the flow.
+        if let Some(route) = self.route_set.lock().first() {
+            let same_host = match (conn.get_remote_addr(), route.typed()) {
+                (Some(remote), Ok(route)) => remote.addr.host == route.uri.host_with_port.host,
+                _ => false,
+            };
+            if !same_host {
+                return None;
+            }
         }
         // Skip flows whose transport already terminated (e.g. browser closed
         // the WebSocket): dial-back via the recorded address is a better
@@ -1110,14 +1122,14 @@ impl DialogInner {
                 // legs whose remote target cannot be routed the classic way;
                 // fall through to the dial-back retry below.
                 need_fallback_retry = self.role == TransactionRole::Server && method != Method::Ack;
+                warn!(
+                    id = self.id.lock().to_string(),
+                    destination = tx.destination.as_ref().map(|d| d.to_string()).as_deref(),
+                    req = %tx.original,
+                    "failed to send request error: {}",
+                    e
+                );
                 if !need_fallback_retry {
-                    warn!(
-                        id = self.id.lock().to_string(),
-                        destination = tx.destination.as_ref().map(|d| d.to_string()).as_deref(),
-                        req = %tx.original,
-                        "failed to send request error: {}",
-                        e
-                    );
                     return Err(e);
                 }
             }

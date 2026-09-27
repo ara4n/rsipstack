@@ -408,6 +408,43 @@ async fn test_affinity_skips_unreliable_udp_connections() {
     );
 }
 
+/// A Record-Routing trunk (Twilio over TLS) whose Route is the host the
+/// flow is to: in-dialog requests stay on the flow. A Route elsewhere
+/// still wins over the flow.
+#[tokio::test]
+async fn test_affinity_keeps_flow_when_route_is_the_flow_peer() {
+    let endpoint = create_endpoint_without_transports().await.unwrap();
+
+    let dialog_for = |rr: &str| {
+        let mut initial = create_wss_invite_request("t1", "", "rr-callid", "z9hG4bKrr");
+        initial
+            .headers
+            .push(crate::sip::Header::RecordRoute(crate::sip::headers::RecordRoute::new(rr)));
+        Arc::new(server_dialog(
+            endpoint.inner.clone(),
+            TransactionRole::Server,
+            initial,
+            "sip:bob@example.com",
+        ))
+    };
+
+    let flow = create_wss_flow(&endpoint.inner, wss_flow_addr(38_126)).await;
+
+    let same = dialog_for("<sip:127.0.0.1:5061;transport=tls;lr>");
+    same.set_server_connection(Some(flow.sip_conn.clone()));
+    assert!(
+        same.test_resolve_affinity_connection().is_some(),
+        "a Route to the flow's own host must not force a new connection"
+    );
+
+    let other = dialog_for("<sip:10.0.0.1:5061;transport=tls;lr>");
+    other.set_server_connection(Some(flow.sip_conn.clone()));
+    assert!(
+        other.test_resolve_affinity_connection().is_none(),
+        "a Route to another host takes precedence over the flow"
+    );
+}
+
 #[tokio::test]
 async fn test_affinity_requires_recorded_reliable_server_connection() {
     let endpoint = create_endpoint_without_transports().await.unwrap();
