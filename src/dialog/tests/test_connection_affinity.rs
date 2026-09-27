@@ -436,6 +436,12 @@ async fn test_affinity_keeps_flow_when_route_is_the_flow_peer() {
         same.test_resolve_affinity_connection().is_some(),
         "a Route to the flow's own host must not force a new connection"
     );
+    // ...and the Via names the flow's transport, not the first listener.
+    let info = same
+        .make_request(Method::Info, None, None, None, None, None)
+        .unwrap();
+    let via = info.via_header().unwrap().typed().unwrap();
+    assert_eq!(via.transport, Transport::Wss);
 
     let other = dialog_for("<sip:10.0.0.1:5061;transport=tls;lr>");
     other.set_server_connection(Some(flow.sip_conn.clone()));

@@ -895,8 +895,25 @@ impl DialogInner {
         headers: Option<Vec<crate::sip::Header>>,
         body: Option<Vec<u8>>,
     ) -> Result<crate::sip::Request> {
+        let addr = addr.or_else(|| self.via_addr_for_flow());
         let via = self.endpoint_inner.get_via(addr, branch)?;
         self.make_request_with_vias(method, cseq, vec![via], headers, body)
+    }
+
+    /// Via address for a request that will ride the affinity flow: the
+    /// listener of the flow's transport (RFC 3261 §18.1.1, the Via names
+    /// the transport actually used). Without this the Via named the first
+    /// listener, typically UDP, and a peer honouring it sent its responses
+    /// to a UDP port nothing listens on.
+    fn via_addr_for_flow(&self) -> Option<SipAddr> {
+        let conn = self.resolve_affinity_connection()?;
+        let transport = conn.get_addr().r#type?;
+        self.endpoint_inner
+            .transport_layer
+            .get_addrs()
+            .into_iter()
+            .find(|a| a.r#type == Some(transport))
+            .or_else(|| Some(conn.get_addr().clone()))
     }
 
     pub(super) fn make_response(
