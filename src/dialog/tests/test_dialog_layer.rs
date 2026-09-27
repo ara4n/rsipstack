@@ -432,15 +432,16 @@ async fn test_server_invite_dialog_with_tcp_transport() -> crate::Result<()> {
     // Dialog should be created
     assert_eq!(dialog_layer.len(), 1);
 
-    // The remote_uri should have a Transport::Tcp param added
+    // The remote target is the peer's Contact as given: the flow's
+    // transport must not be stamped onto it (a B2BUA's internal UDP
+    // Contact sent back as `;transport=TCP` is undeliverable for it).
     let remote_uri = dialog.inner.remote_uri.lock();
-    let has_tcp_transport = remote_uri
-        .params
-        .iter()
-        .any(|p| matches!(p, Param::Transport(Transport::Tcp)));
     assert!(
-        has_tcp_transport,
-        "expected Transport::Tcp param in remote_uri, got params: {:?}",
+        !remote_uri
+            .params
+            .iter()
+            .any(|p| matches!(p, Param::Transport(Transport::Tcp))),
+        "flow transport leaked into remote_uri: {:?}",
         remote_uri.params
     );
 
