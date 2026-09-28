@@ -408,18 +408,17 @@ async fn test_affinity_skips_unreliable_udp_connections() {
     );
 }
 
-/// A Record-Routing trunk (Twilio over TLS) whose Route is the host the
-/// flow is to: in-dialog requests stay on the flow. A Route elsewhere
-/// still wins over the flow.
+/// A Record-Routing proxy (Twilio over TLS, a Kamailio in front of a UA):
+/// in-dialog requests stay on the flow, however the Route names the proxy.
 #[tokio::test]
 async fn test_affinity_keeps_flow_when_route_is_the_flow_peer() {
     let endpoint = create_endpoint_without_transports().await.unwrap();
 
     let dialog_for = |rr: &str| {
         let mut initial = create_wss_invite_request("t1", "", "rr-callid", "z9hG4bKrr");
-        initial
-            .headers
-            .push(crate::sip::Header::RecordRoute(crate::sip::headers::RecordRoute::new(rr)));
+        initial.headers.push(crate::sip::Header::RecordRoute(
+            crate::sip::headers::RecordRoute::new(rr),
+        ));
         Arc::new(server_dialog(
             endpoint.inner.clone(),
             TransactionRole::Server,
@@ -443,11 +442,13 @@ async fn test_affinity_keeps_flow_when_route_is_the_flow_peer() {
     let via = info.via_header().unwrap().typed().unwrap();
     assert_eq!(via.transport, Transport::Wss);
 
-    let other = dialog_for("<sip:10.0.0.1:5061;transport=tls;lr>");
+    // A Route naming the proxy differently (a hostname, another node's
+    // address) still rides the flow: that proxy is the flow's far end.
+    let other = dialog_for("<sip:proxy.example.com:5061;transport=tls;lr>");
     other.set_server_connection(Some(flow.sip_conn.clone()));
     assert!(
-        other.test_resolve_affinity_connection().is_none(),
-        "a Route to another host takes precedence over the flow"
+        other.test_resolve_affinity_connection().is_some(),
+        "the nearest Route hop is the flow's peer, whatever it calls itself"
     );
 }
 
@@ -471,15 +472,15 @@ async fn test_affinity_requires_recorded_reliable_server_connection() {
     inner.set_server_connection(Some(flow.sip_conn));
     assert!(inner.test_resolve_affinity_connection().is_some());
 
-    // With a route set present (loose-routing proxy in path), affinity must
-    // yield to route-set based resolution.
+    // A route set (loose-routing proxy in path) does not change that: its
+    // nearest hop is the proxy at the far end of the flow.
     inner
         .route_set
         .lock()
         .push(Route::from("sip:proxy.example.com;lr"));
     assert!(
-        inner.test_resolve_affinity_connection().is_none(),
-        "route set must take precedence over raw flow affinity"
+        inner.test_resolve_affinity_connection().is_some(),
+        "the flow reaches the nearest Route hop"
     );
 }
 

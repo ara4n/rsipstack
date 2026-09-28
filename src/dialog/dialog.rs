@@ -1041,11 +1041,10 @@ impl DialogInner {
     /// Resolve the connection to reuse for outgoing in-dialog requests
     /// (RFC 5626 flow affinity / RFC 7118 §6.2).
     ///
-    /// Returns `Some(connection)` when all of the following hold:
-    /// * the recorded connection uses a reliable transport (WS/WSS/TCP/TLS)
-    ///   — UDP dialogs keep the classic destination-based routing,
-    /// * the dialog has no route set; with loose-routing proxies in path the
-    ///   request must follow the route set, not the raw transport flow.
+    /// Returns `Some(connection)` when the recorded connection uses a
+    /// reliable transport (WS/WSS/TCP/TLS) that is still open; UDP dialogs
+    /// keep the classic destination-based routing. A route set does not
+    /// change this: its nearest hop is the flow's peer.
     ///
     /// Applies to both dialog roles: a UAS dialog rides the flow the initial
     /// request arrived on; a UAC dialog rides the flow its initial INVITE
@@ -1055,21 +1054,13 @@ impl DialogInner {
         if !conn.is_reliable() {
             return None;
         }
-        // A Record-Routing proxy (a SIP trunk, say) wants in-dialog requests
-        // sent to its Route, but when that Route is the very host the flow
-        // is to, the live flow *is* the way to reach it: reopening a
-        // connection to it by IP is at best redundant and, over TLS,
-        // usually impossible (a certificate for its hostname, not its IP).
-        // Only a Route pointing somewhere else takes precedence over the flow.
-        if let Some(route) = self.route_set.lock().first() {
-            let same_host = match (conn.get_remote_addr(), route.typed()) {
-                (Some(remote), Ok(route)) => remote.addr.host == route.uri.host_with_port.host,
-                _ => false,
-            };
-            if !same_host {
-                return None;
-            }
-        }
+        // A Record-Routing proxy wants in-dialog requests sent to its Route,
+        // and the nearest Route hop is the proxy at the other end of this
+        // flow: the one that sent us the initial request, or that we sent it
+        // to. The live flow *is* the way to reach it; a new connection is at
+        // best redundant and over TLS often impossible (the Route names an
+        // IP the certificate does not cover, or a name resolving to another
+        // node of the proxy, which knows nothing of the dialog).
         // Skip flows whose transport already terminated (e.g. browser closed
         // the WebSocket): dial-back via the recorded address is a better
         // last resort than retransmitting into a dead socket until Timer B.
